@@ -13,9 +13,18 @@ import (
 )
 
 type Server struct {
-	addr     string
-	listener net.Listener
-	errors   chan error
+	addr        string
+	listener    net.Listener
+	errors      chan error
+	subscribers struct {
+		byId map[string]*Client
+		byCh map[string]*[]Client
+	}
+}
+
+type Client struct {
+	addr string
+	uuid string
 }
 
 func New(addr string) (*Server, error) {
@@ -32,6 +41,7 @@ func New(addr string) (*Server, error) {
 		addr:     addr,
 		listener: listener,
 		errors:   make(chan error, 32),
+		clients:  make(map[string]*Client),
 	}, nil
 }
 
@@ -77,7 +87,7 @@ func (s *Server) handleRequest(conn net.Conn) {
 	channel := string(blobs[1])
 	payload := blobs[2]
 
-	reply, err := processCommand(command, channel, payload)
+	reply, err := s.processCommand(command, channel, payload)
 	if err != nil {
 		fmt.Println("Error processing command:", err)
 		return
@@ -88,16 +98,28 @@ func (s *Server) handleRequest(conn net.Conn) {
 	conn.Close()
 }
 
-func processCommand(cmd string, channel string, payload []byte) (string, error) {
-	switch cmd {
+func (s *Server) processCommand(command string, client *Client, channel string, payload []byte) (string, error) {
+
+	// We need to register the clients on the first command
+	// s.subscribers.byId[uuid] = &Client{uuid: uuid.New()}
+
+	switch command {
 	case PUB:
-		// do publish
+		s.publish(channel, payload)
 	case SUB:
-		// do subscribe
+		s.subscribe(client, channel)
 	case UNS:
 		// do unsubscribe
 	default:
-		return NACK, fmt.Errorf("Unknown command %q", cmd)
+		return NACK, fmt.Errorf("Unknown command %q", command)
 	}
 	return ACK, nil
+}
+
+func (s *Server) publish(channel string, payload string) {
+	// publish
+}
+
+func (s *Server) subscribe(client Client, channel string) {
+	// subscribe
 }
