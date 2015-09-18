@@ -35,5 +35,5 @@ func main() {
 	ctrlc := make(chan os.Signal)
 	signal.Notify(ctrlc, os.Interrupt)
 	<-ctrlc
-	pubsubd.Close()
+	pubsubd.Stop()
 }
