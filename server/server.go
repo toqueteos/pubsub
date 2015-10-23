@@ -8,28 +8,32 @@ import (
 	"io"
 	"net"
 	"strings"
+	"time"
 
-	. "github.com/ikanor/pubsub/conf"
+	"github.com/ikanor/pubsub"
+	"github.com/ikanor/pubsub/client"
+
+	"github.com/satori/go.uuid"
+	"gopkg.in/inconshreveable/log15.v2"
 )
 
 type Server struct {
-	addr        string
-	listener    net.Listener
-	errors      chan error
-	subscribers struct {
-		byId map[string]*Client
-		byCh map[string]*[]Client
-	}
-}
+	sid      uuid.UUID
+	addr     string
+	listener net.Listener
+	errors   chan error
+	clients  map[string]*client.Client
+	// subscribers struct {
+	// 	byId map[string]*Client
+	// 	byCh map[string]*[]Client
+	// }
 
-type Client struct {
-	addr string
-	uuid string
+	peerMessages chan PeerMessage
 }
 
 func New(addr string) (*Server, error) {
 	if strings.Index(addr, ":") == -1 {
-		addr = fmt.Sprintf("%s:%s", addr, DefaultPort)
+		addr = fmt.Sprintf("%s:%s", addr, pubsub.DefaultPort)
 	}
 
 	listener, err := net.Listen("tcp", addr)
@@ -38,22 +42,51 @@ func New(addr string) (*Server, error) {
 	}
 
 	return &Server{
+		sid:      uuid.NewV4(),
 		addr:     addr,
 		listener: listener,
-		errors:   make(chan error, 32),
-		clients:  make(map[string]*Client),
+		errors:   make(chan error),
+		clients:  make(map[string]*client.Client),
 	}, nil
 }
 
 func (s *Server) Start() {
+	go s.pingPeers()
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			s.errors <- err
 			continue
 		}
-		go s.handleRequest(conn)
+
+		peer := NewPeer(conn)
+		go peer.Loop()
+		go s.addPeer(peer)
 	}
+}
+
+func (s *Server) loop() {
+	var ping = time.Tick(30 * time.Second)
+	for {
+		select {
+		case <-ping:
+			log15.Info("Pinging all clients...")
+			go s.pingPeers()
+		}
+	}
+}
+
+func (s Server) pingPeers() {
+
+}
+
+type PeerMessage struct {
+	Command byte
+	Peer    *Peer
+}
+
+func (s *Server) addPeer(addr net.Addr, peer *Peer) {
+	s.peerMessages <- PeerMessage{CmdPeerAdd, peer}
 }
 
 func (s *Server) ForEachError(fn func(error)) {
@@ -67,59 +100,57 @@ func (s *Server) Stop() {
 	close(s.errors)
 }
 
-// protoRead reads binary blobs with the following format:
-//
-//    COMMAND ' ' CHANNEL ' ' SIZE PAYLOAD
+type CmdInfo struct {
+	Conn    net.Conn
+	Command string
+	Channel string
+	Payload []byte
+}
+
 func (s *Server) handleRequest(conn net.Conn) {
 	r := bufio.NewReader(conn)
-	rw := bufio.NewReadWriter(r, nil)
+	w := bufio.NewWriter(conn)
 
-	var payloadSize int64
-	err := binary.Read(rw, binary.BigEndian, &payloadSize)
+	for {
+		command, err := r.ReadByte()
+		if err != nil {
+			s.errors <- err
+			continue
+		}
+		channel, err := readSizeAndBlob(r).String()
+		if err != nil {
+			s.errors <- err
+			continue
+		}
+		payload, err := readSizeAndBlob(r).Bytes()
+		if err != nil {
+			s.errors <- err
+			continue
+		}
 
-	var buf bytes.Buffer
-	io.CopyN(&buf, rw, payloadSize)
+		s.processCommand(&CmdInfo{
+			Conn:    conn,
+			Command: command,
+			Channel: channel,
+			Payload: payload,
+		})
+	}
+}
 
-	body := buf.Bytes()
-
-	blobs := bytes.SplitN(body, []byte(" "), 2)
-	command := string(blobs[0])
-	channel := string(blobs[1])
-	payload := blobs[2]
-
-	reply, err := s.processCommand(command, channel, payload)
+func readSizeAndBlob(r io.Reader) (*bytes.Buffer, error) {
+	var (
+		buf  bytes.Buffer
+		size int64
+	)
+	err := binary.Read(r, binary.BigEndian, &size)
 	if err != nil {
-		fmt.Println("Error processing command:", err)
-		return
+		return nil, err
 	}
-
-	conn.Write([]byte(reply))
-	// Close the connection when you're done with it.
-	conn.Close()
+	buf.Reset()
+	io.CopyN(&buf, r, size)
+	return buf, nil
 }
 
-func (s *Server) processCommand(command string, client *Client, channel string, payload []byte) (string, error) {
-
-	// We need to register the clients on the first command
-	// s.subscribers.byId[uuid] = &Client{uuid: uuid.New()}
-
-	switch command {
-	case PUB:
-		s.publish(channel, payload)
-	case SUB:
-		s.subscribe(client, channel)
-	case UNS:
-		// do unsubscribe
-	default:
-		return NACK, fmt.Errorf("Unknown command %q", command)
-	}
-	return ACK, nil
-}
-
-func (s *Server) publish(channel string, payload string) {
-	// publish
-}
-
-func (s *Server) subscribe(client Client, channel string) {
-	// subscribe
+func (s *Server) ping(conn net.Conn) error {
+	_, err := fmt.Fprintf(conn, "%x-pubsub-ping-%d", s.sid, time.Now().Unix())
 }

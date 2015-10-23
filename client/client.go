@@ -1,92 +1,81 @@
 package client
 
 import (
-	"bufio"
-	"errors"
+	"bytes"
+	"io"
 	"net"
+	"strings"
 
-	. "github.com/ikanor/pubsub/conf"
+	"github.com/ikanor/pubsub"
+	"github.com/ikanor/pubsub/wire"
 )
 
-var ErrNack = errors.New("The server responded with a NACK")
+type SubscribeFn func(client Client, payload []byte)
 
-type Client interface {
-	Subscribe(string, func(string)) (*Subscription, error)
-	Unsubscribe(*Subscription) error
-	Publish(string) error
+type Interface interface {
+	Subscribe(channel string, fn SubscribeFn) error
+	Unsubscribe(channel string) error
+	Publish(channel string, payload []byte) error
 }
 
-type Subscription struct {
-	name   string
-	action func(string)
+type Client struct {
+	addr   string
+	conn   net.Conn
+	closed bool
 }
 
-type client struct {
-	addr string
-	subs map[string][]*Subscription
-	conn net.Conn
-	buff *bufio.ReadWriter
-}
-
-func NewClient(addr string) Client {
-	return &client{addr: addr}
-}
-
-func (c *client) connect() (err error) {
-	c.conn, err = net.Dial("tcp", c.addr)
+func New(addr string) (Interface, error) {
+	if strings.Index(addr, ":") == -1 {
+		addr = addr + ":" + pubsub.DefaultPort
+	}
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return
+		return nil, err
 	}
-	c.buff = bufio.NewReadWriter(bufio.NewReader(c.conn), nil)
-	return
+	cli := &Client{
+		addr: addr,
+		conn: conn,
+	}
+	go cli.loop()
+	return cli, nil
 }
 
-func (c *client) Subscribe(ch string, action func(string)) (*Subscription, error) {
-	if c.conn == nil {
-		_ = c.connect()
+func (c *Client) loop() {
+	var buf bytes.Buffer
+	for !c.closed {
+		io.Copy(&buf, c.conn)
 	}
-	if len(c.subs[ch]) == 0 {
-		c.buff.Write([]byte(SUB + " " + ch))
-		msg, err := c.buff.ReadString('\x00')
-		if err != nil {
-			return nil, err
-		}
-		if msg == NACK {
-			return nil, ErrNack
-		}
-	}
-	s := Subscription{
-		name:   ch,
-		action: action,
-	}
-	c.subs[ch] = append(c.subs[ch], &s)
-	return &s, nil
 }
 
-func (c *client) Unsubscribe(s *Subscription) error {
-	n := c.subs[s.name]
-	for i := range n {
-		if n[i] != s {
-			continue
-		}
-		n[i] = n[len(n)-1]
-		c.subs[s.name] = n[:len(n)-1]
-		break
+// Subscribe tells the server to send us notifications when something is
+// published to `channel`.
+func (c *Client) Subscribe(channel string, fn SubscribeFn) error {
+	var buf bytes.Buffer
+	buf.WriteByte(pubsub.CmdSubscribe)
+	if err := wire.WriteString(&buf, channel); err != nil {
+		return err
 	}
-	if len(c.subs[s.name]) == 0 {
-		c.buff.Write([]byte(UNS + " " + s.name))
-		msg, err := c.buff.ReadString('\x00')
-		if err != nil {
-			return err
-		}
-		if msg == NACK {
-			return ErrNack
-		}
+	_, err := io.Copy(c.conn, &buf)
+	return err
+}
+
+// Unsubscribe tells the server to stop sending us notifications when something
+// is published to `channel`.
+func (c *Client) Unsubscribe(channel string) error {
+	var buf bytes.Buffer
+	buf.WriteByte(pubsub.CmdUnsubscribe)
+	if err := wire.WriteString(&buf, channel); err != nil {
+		return err
 	}
+	_, err := io.Copy(c.conn, &buf)
+	return err
+}
+
+func (c *Client) Publish(channel string, payload []byte) error {
+	panic("client.Publish is not implemented")
 	return nil
-
 }
 
-func (c *client) Publish(msg string) error {
-	return nil
+func (c *Client) Stop() {
+
 }

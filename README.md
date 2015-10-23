@@ -1,3 +1,3 @@
-# Pub-Sub Server for Go
+# PubSub for Go
 
-Yet another pub sub server with MQ support
+A no-dependencies pubsub client/server library.
